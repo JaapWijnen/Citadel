@@ -188,7 +188,6 @@ public final class DHClientServerParameters {
             clientHash: exchangeHash,
             server: server
         ) else {
-            fatalError("SSHError.keyExchangeMismatch")
             throw SSHError.keyExchangeMismatch
         }
     }

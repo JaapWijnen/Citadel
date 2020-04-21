@@ -18,6 +18,7 @@ let package = Package(
         // Dependencies declare other packages that this package depends on.
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.0.0"),
         .package(url: "https://github.com/apple/swift-crypto.git", from: "1.0.0"),
+        .package(url: "https://github.com/OpenKitten/MongoKitten.git", from: "6.0.0"),
     ],
     targets: [
         // Targets are the basic building blocks of a package. A target can define a module or a test suite.
@@ -27,10 +28,15 @@ let package = Package(
             dependencies: [
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIO", package: "swift-nio"),
+                .product(name: "MongoKitten", package: "MongoKitten")
             ]
         ),
         .testTarget(
             name: "CitadelTests",
-            dependencies: ["Citadel"]),
+            dependencies: [
+                "Citadel",
+                .product(name: "MongoKitten", package: "MongoKitten")
+            ]
+        ),
     ]
 )

@@ -11,6 +11,13 @@ enum SSHClientMessage {
     case kexDhInit(DHClientParameters)
     case dhAcceptKeys
     case requestService(String)
+    case requestFailure, requestSuccess
+//    case openTCPForwardChannel(address: String, port: UInt32)
+//    case cancelTCPForwardChannel(address: String, port: UInt32)
+    case openChannel(SSHChannelRequest)
+    case adjustChannelWindow(channel: UInt32, bytesToAdd: UInt32)
+    case channelSend(channel: UInt32, data: ByteBuffer)
+    case closeChannel(UInt32)
     case authenticatePassword(username: String, password: String)
 }
 
@@ -313,10 +320,9 @@ final class SSHStateContext {
     }
     
     let clientParameters: DHClientParameters
-    var handlers = [UInt8: (SSHPacket) -> ()]()
-    var fallbackHandler: (SSHPacket) -> () = { packet in
-        print("unhandled packet \(packet)")
-    }
+    var handlers = [SSHPacketType: (Result<SSHPacket, Error>) -> Bool]()
+    var channels = [UInt32: (ByteBuffer) -> ()]()
+    
     var serverIdentification: String?
     var state: _State
     private(set) var clientBlockSize: Int = 8
@@ -345,6 +351,38 @@ final class SSHStateContext {
     deinit {
         if let encryptionContext = encryptionContext {
             CCryptoBoringSSL_EVP_CIPHER_CTX_free(encryptionContext)
+        }
+    }
+    
+    func fallbackHandler(packet: SSHPacket, channel: Channel) {
+        var payload = packet.payload
+        switch payload.readInteger(as: UInt8.self) {
+        case SSHPacketType.globalRequest.rawValue:
+            guard let type = payload.readSSH2String() else {
+                // SSH2 protocol error
+                return
+            }
+            
+            let wantsReply = payload.readInteger(as: UInt8.self) == 0x01
+            
+            switch type {
+                // None supported yet
+            default:
+                if wantsReply {
+                    _ = channel.writeAndFlush(SSHClientMessage.requestFailure)
+                }
+            }
+        case SSHPacketType.channelData.rawValue:
+            guard
+                let id = payload.readInteger(as: UInt32.self),
+                let buffer = payload.readSSH2Buffer()
+            else {
+                return
+            }
+            
+            channels[id]?(buffer)
+        default:
+            ()
         }
     }
     
@@ -548,6 +586,10 @@ final class SSHPacketEncoder: MessageToByteEncoder {
             out.writeInteger(SSHPacketType.serviceRequest.rawValue)
             out.writeInteger(UInt32(service.utf8.count))
             out.writeString(service)
+        case .requestFailure:
+            out.writeInteger(SSHPacketType.requestFailure.rawValue)
+        case .requestSuccess:
+            out.writeInteger(SSHPacketType.requestSuccess.rawValue)
         case .authenticatePassword(let username, let password):
             out.writeInteger(SSHPacketType.userAuthRequest.rawValue)
             
@@ -561,6 +603,25 @@ final class SSHPacketEncoder: MessageToByteEncoder {
             
             
             out.writeSSH2String(password)
+        case .openChannel(let request):
+            out.writeInteger(SSHPacketType.channelOpen.rawValue)
+            out.writeSSH2String(request.channelType.rawValue)
+            out.writeInteger(request.senderId)
+            out.writeInteger(request.windowSize)
+            out.writeInteger(request.maxPacketSize)
+            var channelData = request.channelData
+            out.writeBuffer(&channelData)
+        case .adjustChannelWindow(let channel, let bytesToAdd):
+            out.writeInteger(SSHPacketType.channelWindowAdjust.rawValue)
+            out.writeInteger(channel)
+            out.writeInteger(bytesToAdd)
+        case .channelSend(let channel, var data):
+            out.writeInteger(SSHPacketType.channelData.rawValue)
+            out.writeInteger(channel)
+            out.writeSSH2Buffer(&data)
+        case .closeChannel(let channel):
+            out.writeInteger(SSHPacketType.channelClose.rawValue)
+            out.writeInteger(channel)
         }
         
         payloadSize = out.writerIndex - payloadSize
@@ -664,10 +725,13 @@ final class SSHPacketDecoder: ByteToMessageDecoder {
                     throw SSHError.protocolError
                 }
                 
-                if let handler = self.context.handlers[type] {
-                    handler(packet)
-                } else {
-                    self.context.fallbackHandler(packet)
+                guard
+                    let sshType = SSHPacketType(rawValue: type),
+                    let handler = self.context.handlers[sshType],
+                    handler(.success(packet))
+                else {
+                    self.context.fallbackHandler(packet: packet, channel: context.channel)
+                    return .continue
                 }
             }
             
@@ -677,6 +741,11 @@ final class SSHPacketDecoder: ByteToMessageDecoder {
     
     func decodeLast(context: ChannelHandlerContext, buffer: inout ByteBuffer, seenEOF: Bool) throws -> DecodingState {
         buffer.moveReaderIndex(to: buffer.readableBytes)
+        
+        for handler in self.context.handlers.values {
+            _ = handler(.failure(SSHError.disconnected))
+        }
+        
         return .continue
     }
 }
@@ -869,6 +938,20 @@ enum SSHPacketType: UInt8 {
     case userAuthFailure = 51
     case userAuthSuccess = 52
     case userAuthBanner = 53
+    case globalRequest = 80
+    case requestSuccess = 81
+    case requestFailure = 82
+    case channelOpen = 90
+    case channelOpenConfirm = 91
+    case channelOpenFailure = 92
+    case channelWindowAdjust = 93
+    case channelData = 94
+    case channelExtendedData = 95
+    case channelEOF = 96
+    case channelClose = 97
+    case channelRequest = 98
+    case channelRequestSuccess = 99
+    case channelRequestFailure = 100
 }
 
 struct SSHRSA: CertificateFormat {

@@ -1,6 +1,9 @@
 import XCTest
 @testable import Citadel
 import NIO
+import MongoKitten
+import MongoClient
+import Logging
 import CCryptoBoringSSL
 
 final class CitadelTests: XCTestCase {
@@ -35,7 +38,7 @@ final class CitadelTests: XCTestCase {
         let k = try Array(Data(contentsOf: URL(string: "file:///Users/joannisorlandos/Projects/Citadel/secret.key")!))
         let f = try Array(Data(contentsOf: URL(string: "file:///Users/joannisorlandos/Projects/Citadel/s_pub.key")!))
         let h = try Array(Data(contentsOf: URL(string: "file:///Users/joannisorlandos/Projects/Citadel/H.key")!))
-        let ceh = try Array(Data(contentsOf: URL(string: "file:///Users/joannisorlandos/Projects/Citadel/eh.key")!))
+//        let ceh = try Array(Data(contentsOf: URL(string: "file:///Users/joannisorlandos/Projects/Citadel/eh.key")!))
         
         dhContext.pointee.p = CCryptoBoringSSL_BN_bin2bn(dh14p, dh14p.count, nil)
         dhContext.pointee.g = CCryptoBoringSSL_BN_bin2bn(generator2, generator2.count, nil)
@@ -201,32 +204,22 @@ final class CitadelTests: XCTestCase {
     }
     
     func testConnect() throws {
-        let dhContext = CCryptoBoringSSL_DH_new()!
-        let x = try Array(Data(contentsOf: URL(string: "file:///Users/joannisorlandos/Projects/Citadel/priv.key")!))
-        let e = try Array(Data(contentsOf: URL(string: "file:///Users/joannisorlandos/Projects/Citadel/pub.key")!))
-        
-        dhContext.pointee.p = CCryptoBoringSSL_BN_bin2bn(dh14p, dh14p.count, nil)
-        dhContext.pointee.g = CCryptoBoringSSL_BN_bin2bn(generator2, generator2.count, nil)
-        
-        CCryptoBoringSSL_DH_set0_key(
-            dhContext,
-            CCryptoBoringSSL_BN_bin2bn(e, e.count, nil),
-            CCryptoBoringSSL_BN_bin2bn(x, x.count, nil)
-        )
         
         let session = try SSHSession.connect(
-            host: "example.com",
-            keys: .premade(dhContext)
+            host: ""
         ).wait()
-
-        print("Connected")
 
         try session.authenticate(
-            username: "secret",
-            byPassword: "hidden"
+            username: "",
+            byPassword: ""
         ).wait()
-
-        print("Authenticated")
+        
+        let channel = try session.forward(remoteHost: "localhost", remotePort: 27017, connectedIpAddress: "127.0.0.1", connectedPort: 27017).wait()
+        
+        let ctx = MongoClientContext(logger: .init(label: "bla"))
+        try MongoConnection.addHandlers(to: channel, context: ctx).wait()
+        let mongo = MongoConnection(channel: channel, context: ctx)
+        try print(mongo.listDatabases().wait())
     }
 
     static var allTests = [

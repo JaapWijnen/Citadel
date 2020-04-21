@@ -83,6 +83,7 @@ public enum SSHKeyGenerator {
 public final class SSHSession {
     let channel: Channel
     let context: SSHStateContext
+    var senderId: UInt32 = 0
     
     init(channel: Channel, context: SSHStateContext) {
         self.channel = channel
@@ -184,14 +185,14 @@ public final class SSHSession {
     func authenticate(username: String, byPassword password: String) -> EventLoopFuture<Void> {
         let promise = self.channel.eventLoop.makePromise(of: SSHPacket.self)
         
-        self.context.handlers[SSHPacketType.serviceAccept.rawValue] = promise.succeed
+        self.context.handlers[.serviceAccept] = promise.accept
         
         return self.channel.writeAndFlush(
             SSHClientMessage.requestService("ssh-userauth")
         ).flatMap {
             promise.futureResult
         }.flatMap { _ in
-            self.context.handlers[SSHPacketType.serviceAccept.rawValue] = nil
+            self.context.handlers[.serviceAccept] = nil
             return self._serviceAuthenticate(username: username, byPassword: password)
         }
     }
@@ -199,30 +200,35 @@ public final class SSHSession {
     func _serviceAuthenticate(username: String, byPassword password: String) -> EventLoopFuture<Void> {
         let promise = self.channel.eventLoop.makePromise(of: SSHPacket.self)
         
-        self.context.handlers[SSHPacketType.userAuthSuccess.rawValue] = promise.succeed
-        self.context.handlers[SSHPacketType.userAuthFailure.rawValue] = promise.succeed
+        self.context.handlers[.userAuthSuccess] = promise.accept
+        self.context.handlers[.userAuthFailure] = promise.accept
         
         return self.channel.writeAndFlush(
             SSHClientMessage.authenticatePassword(
                 username: username,
                 password: password
             )
-        )
-            .flatMap { promise.futureResult }
-            .flatMapThrowing { packet in
-                var payload = packet.payload
-                
-                switch SSHLoginReply(parsing: &payload) {
-                case .success:
-                    return
-                case .failure:
-                    throw SSHError.authenticationFailure
-                case .none:
-                    throw SSHError.internalError
-                }
+        ).flatMap { promise.futureResult }.flatMapThrowing { packet in
+            var payload = packet.payload
+            
+            switch SSHLoginReply(parsing: &payload) {
+            case .success:
+                return
+            case .failure:
+                throw SSHError.authenticationFailure
+            case .none:
+                throw SSHError.internalError
+            }
         }.always { _ in
-            self.context.handlers[SSHPacketType.userAuthSuccess.rawValue] = nil
-            self.context.handlers[SSHPacketType.userAuthFailure.rawValue] = nil
+            self.context.handlers[.userAuthSuccess] = nil
+            self.context.handlers[.userAuthFailure] = nil
         }
+    }
+}
+
+extension EventLoopPromise {
+    func accept(_ value: Result<Value, Error>) -> Bool {
+        completeWith(value)
+        return true
     }
 }
