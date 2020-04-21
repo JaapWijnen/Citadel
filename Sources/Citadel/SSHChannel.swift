@@ -43,7 +43,7 @@ fileprivate let _assert_sanity: Void = { () -> Void in
 // MARK: - SSHForwardedChannel
 
 /// An NIO-based channel that forwards data over an SSH connection.
-public final class SSHForwardedChannel {
+internal final class SSHForwardedChannel {
     
     public var isOpen: Bool { self.state != .closed } // `self.state == .open(_)` doesn't work
     
@@ -220,13 +220,12 @@ extension SSHSession {
     }
     
     /// Outward-facing interface to channel forwarding.
-    /// - TODO: Should this actually be public? It seemed like it but I could have misunderstood.
     public func forward(
         remoteHost: String,
         remotePort: UInt16,
         connectedIpAddress: String,
         connectedPort: UInt16
-    ) -> EventLoopFuture<SSHForwardedChannel> {
+    ) -> EventLoopFuture<Channel> {
         // Make sure our config params make sense. It's very poor form to potentially assert only here,
         // which may never get called during normal operation, but it seems the best available option
         // for the time being. The assertions should never fire as long as the values are kept reasonable.
@@ -239,6 +238,6 @@ extension SSHSession {
         buffer.writeSSH2String(connectedIpAddress)
         buffer.writeInteger(UInt32(connectedPort))
         
-        return openChannel(type: .directTcpIp, data: buffer)
+        return openChannel(type: .directTcpIp, data: buffer).map { $0 }
     }
 }

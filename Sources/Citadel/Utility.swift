@@ -44,7 +44,7 @@ extension Swift.Result {
     /// And, for good form, let's do the inverse of `hasSucceeded` as well.
     @inlinable public var hasFailed: Bool { switch self {
         case .success: return false
-        case. failure: return true
+        case .failure: return true
     } }
 
 }
