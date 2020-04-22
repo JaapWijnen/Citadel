@@ -11,6 +11,15 @@
         }
       },
       {
+        "package": "discretional-precision",
+        "repositoryURL": "https://github.com/gwynne/discretional-precision.git",
+        "state": {
+          "branch": "master",
+          "revision": "997cd50a10bf44944932e2a8d372acc1858b3578",
+          "version": null
+        }
+      },
+      {
         "package": "MongoKitten",
         "repositoryURL": "https://github.com/OpenKitten/MongoKitten.git",
         "state": {
