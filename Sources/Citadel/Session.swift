@@ -5,7 +5,6 @@ import CCryptoBoringSSL
 
 // TODO: Free memory everywhere using class wrappers w/ deinit blocks
 // TODO: Get rid of manual allocation
-// TODO: NIO TCP forwarding channel
 // TODO: Major code cleanups, this code is shit, although, to be fair, most SSH libs I've seen are more shit
 
 private let version = "1.0.0"
