@@ -39,6 +39,9 @@ fileprivate let _assert_sanity: Void = { () -> Void in
     assert(SSH_CHANNEL_MAX_WRITE + 32 < SSH_CHANNEL_MAX_PACKET_SIZE, "Max write can't be within 32 bytes of the max packet size")
 }()
 
+public struct Weak<T: AnyObject> {
+    weak var value: T?
+}
 
 // MARK: - SSHForwardedChannel
 
@@ -50,11 +53,14 @@ internal final class SSHForwardedChannel {
     /// Current channel state and SSH connection control data.
     fileprivate enum State: Equatable {
         case closed
-        case open(SSHChannelOpenChannelInfo)
+        case open(windowSize: Int, SSHChannelOpenChannelInfo)
     }
     
     private var state: State
+    fileprivate var closedWrite = false
+    fileprivate var closedRead = false
     private let session: SSHSession
+    private var writeBuffer = CircularBuffer<(ByteBuffer, EventLoopPromise<Void>)>(initialCapacity: 16)
     private var _pipeline: ChannelPipeline!
     
     fileprivate let closePromise: EventLoopPromise<Void>
@@ -69,7 +75,7 @@ internal final class SSHForwardedChannel {
     
     fileprivate func close() -> EventLoopFuture<Void> {
         switch state {
-        case .open(let state):
+        case .open(_, let state):
             self.state = .closed
             eventLoop.execute {
                 // Remove pipeline handlers
@@ -84,22 +90,65 @@ internal final class SSHForwardedChannel {
         }
     }
     
-    fileprivate func read(_ data: ByteBuffer) {
+    internal func read(_ data: ByteBuffer) {
+        guard
+            !closedRead,
+            case .open(let windowSize, let state) = self.state,
+            data.readableBytes <= windowSize
+        else {
+            return
+        }
+        
+        let currentClientWindow = windowSize - data.readableBytes
+        self.state = .open(windowSize: currentClientWindow, state)
         pipeline.fireChannelRead(NIOAny(data))
+        
+        // We should be able to handle a meg at a time, right?
+        if currentClientWindow < 1024 * 1024 {
+            _ = session.channel.writeAndFlush(SSHClientMessage.adjustChannelWindow(channel: state.recipientId, bytesToAdd: 1024 * 1024))
+        }
+    }
+    
+    /// We can send more data!
+    internal func expandServerWindow(with size: UInt32) {
+        guard case .open(let windowSize, var state) = self.state else {
+            return
+        }
+        
+        // Don't protect against overflow so stupid client/server implementations don't ruin people's days
+        // Worst case scenario we'll be back at `0` sending no data.
+        state.windowSize = state.windowSize &+ state.windowSize
+        self.state = .open(windowSize: windowSize, state)
     }
     
     fileprivate func write(_ outgoingData: ByteBuffer) -> EventLoopFuture<Void> {
-        guard case .open(let state) = self.state else {
+        guard !closedWrite, case .open(let windowSize, var state) = self.state else {
             return eventLoop.makeFailedFuture(SSHChannelError.isClosed)
+        }
+        
+        defer {
+            self.state = .open(windowSize: windowSize, state)
         }
         
         var buffer = outgoingData
         var future = eventLoop.makeSucceededFuture(())
         
         while buffer.readableBytes > 0 {
+            let size = Swift.min(state.windowSize, state.maxPacketSize, UInt32(buffer.readableBytes))
+            
+            if size == 0 {
+                let promise = eventLoop.makePromise(of: Void.self)
+                writeBuffer.append((buffer, promise))
+                return future.flatMap {
+                    return promise.futureResult
+                }
+            }
+            
             guard let data = buffer.readSlice(length: Swift.min(SSH_CHANNEL_MAX_WRITE, buffer.readableBytes)) else {
                 fatalError("Failure to readSlice(), corrupted ByteBuffer?")
             }
+            
+            state.windowSize -= size
             
             future = future.flatMap {
                 self.session.channel.writeAndFlush(
@@ -141,7 +190,7 @@ extension SSHForwardedChannel: Channel, ChannelCore {
     public var pipeline: ChannelPipeline { _pipeline }
     
     // State getters
-    public var isWritable: Bool { true }
+    public var isWritable: Bool { !closedWrite }
     public var isActive: Bool { true }
     
     /// Registration callback - succeed if open, fail if closed, quite simple really.
@@ -159,8 +208,17 @@ extension SSHForwardedChannel: Channel, ChannelCore {
         switch mode {
         case .all:
             self.close().cascade(to: promise)
-        case .input, .output:
-            promise?.fail(SSHChannelError.unsupported)
+            return
+        case .input:
+            closedRead = true
+        case .output:
+            closedWrite = true
+        }
+        
+        if closedRead && closedWrite {
+            self.close().cascade(to: promise)
+        } else {
+            promise?.succeed(())
         }
     }
     
@@ -212,9 +270,9 @@ extension SSHSession {
         return channel.writeAndFlush(SSHClientMessage.openChannel(openRequest)).flatMap {
             promise.futureResult
         }.map {
-            let channel = SSHForwardedChannel(session: self, state: .open($0))
+            let channel = SSHForwardedChannel(session: self, state: .open(windowSize: Int(openRequest.windowSize), $0))
             
-            self.context.channels[$0.recipientId] = { [weak channel] in channel?.read($0) }
+            self.context.channels[$0.recipientId] = Weak(value: channel)
             return channel
         }
     }

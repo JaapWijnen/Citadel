@@ -13,7 +13,7 @@ struct SSHChannelRequest {
 struct SSHChannelOpenChannelInfo: Equatable {
     let recipientId: UInt32
     let senderId: UInt32
-    let windowSize: UInt32
+    var windowSize: UInt32
     let maxPacketSize: UInt32
     let channelData: ByteBuffer
  

@@ -89,6 +89,28 @@ public final class SSHSession {
         self.context = context
     }
     
+    public static func connect(
+        onChannel channel: Channel,
+        keys: SSHKeyGenerator = .generate
+    ) throws -> EventLoopFuture<SSHSession> {
+        let promise = channel.eventLoop.makePromise(of: String.self)
+        let context = SSHStateContext(
+            promise: promise,
+            allocator: channel.allocator,
+            keys: keys
+        )
+        
+        return channel.pipeline.addHandlers(
+            MessageToByteHandler(SSHPacketEncoder(context: context)),
+            ByteToMessageHandler(SSHPacketDecoder(context: context))
+        ).flatMap {
+            let session = SSHSession(channel: channel, context: context)
+            return session.handshake(
+                versionReply: promise.futureResult
+            ).map { session }
+        }
+    }
+    
     private func handshake(
         versionReply: EventLoopFuture<String>
     ) -> EventLoopFuture<Void> {
@@ -130,21 +152,19 @@ public final class SSHSession {
                         return self.channel.writeAndFlush(
                             SSHClientMessage.dhAcceptKeys
                         ).map {
-                            self.context.initEncryption(
-                                SSHStateContext.Encryption(
-                                    clientCipher: config.clientEncryption,
-                                    clientMac: config.clientMac,
-                                    params: params
-                                )
+                            let encryption = SSHStateContext.Encryption(
+                                clientCipher: config.clientEncryption,
+                                clientMac: config.clientMac,
+                                params: params
                             )
                             
-                            self.context.initDecryption(
-                                SSHStateContext.Decryption(
-                                    serverCipher: config.serverEncryption,
-                                    serverMac: config.serverMac,
-                                    params: params
-                                )
+                            let decryption = SSHStateContext.Decryption(
+                                serverCipher: config.serverEncryption,
+                                serverMac: config.serverMac,
+                                params: params
                             )
+                            
+                            self.context.encryptConnection(decryptUsing: decryption, encryptUsing: encryption)
                         }
                     } catch {
                         return self.channel.eventLoop.makeFailedFuture(error)
@@ -172,16 +192,16 @@ public final class SSHSession {
                 MessageToByteHandler(SSHPacketEncoder(context: context)),
                 ByteToMessageHandler(SSHPacketDecoder(context: context))
             )
-        }.connect(host: host, port: port).map { channel in
-            SSHSession(channel: channel, context: context)
-        }.flatMap { session in
-            return session.handshake(
-                versionReply: promise.futureResult
-            ).map { session }
+        }.connect(host: host, port: port).flatMap { channel in
+            do {
+                return try Self.connect(onChannel: channel)
+            } catch {
+                return group.next().makeFailedFuture(error)
+            }
         }
     }
     
-    func authenticate(username: String, byPassword password: String) -> EventLoopFuture<Void> {
+    public func authenticate(username: String, byPassword password: String) -> EventLoopFuture<Void> {
         let promise = self.channel.eventLoop.makePromise(of: SSHPacket.self)
         
         self.context.handlers[.serviceAccept] = promise.accept
