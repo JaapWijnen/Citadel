@@ -193,7 +193,7 @@ enum SSHLoginReply {
     }
 }
 
-final class SSHStateContext {
+public final class SSHStateContext {
     enum _State {
         enum BinaryPacketState {
             case keyExchange(EventLoopPromise<KeyExchangeInitialization>)
