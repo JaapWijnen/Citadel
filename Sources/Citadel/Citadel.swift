@@ -354,6 +354,21 @@ final class SSHStateContext {
         if let encryptionContext = encryptionContext {
             CCryptoBoringSSL_EVP_CIPHER_CTX_free(encryptionContext)
         }
+        
+        switch state {
+        case .versionExchange(let promise):
+            promise.fail(SSHError.disconnected)
+        case .binaryPackets(.awaitingKeyAcceptance(_, let promise)):
+            promise.fail(SSHError.disconnected)
+        case .binaryPackets(.dhFirstKexPacket(_, let promise)):
+            promise.fail(SSHError.disconnected)
+        case .binaryPackets(.dhKeyExchange(_, _, let promise)):
+            promise.fail(SSHError.disconnected)
+        case .binaryPackets(.keyExchange(let promise)):
+            promise.fail(SSHError.disconnected)
+        case .binaryPackets(.encrypted):
+            return
+        }
     }
     
     func fallbackHandler(packet: SSHPacket, channel: Channel) {
