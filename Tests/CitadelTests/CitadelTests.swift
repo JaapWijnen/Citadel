@@ -204,11 +204,12 @@ final class CitadelTests: XCTestCase {
     }
     
     func testConnect() throws {
-        
         let session = try SSHSession.connect(
             host: ""
         ).wait()
-
+        
+        print("Connected")
+        
         try session.authenticate(
             username: "",
             byPassword: ""
@@ -220,6 +221,8 @@ final class CitadelTests: XCTestCase {
         try MongoConnection.addHandlers(to: channel, context: ctx).wait()
         let mongo = MongoConnection(channel: channel, context: ctx)
         try print(mongo.listDatabases().wait())
+        let colls = try mongo["delier"].listCollections().wait()
+        _ = try colls.first?.find().allResults().wait()
     }
 
     static var allTests = [

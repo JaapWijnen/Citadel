@@ -321,12 +321,14 @@ final class SSHStateContext {
     
     let clientParameters: DHClientParameters
     var handlers = [SSHPacketType: (Result<SSHPacket, Error>) -> Bool]()
-    var channels = [UInt32: (ByteBuffer) -> ()]()
+    var channels = [UInt32: Weak<SSHForwardedChannel>]()
     
     var serverIdentification: String?
     var state: _State
     private(set) var clientBlockSize: Int = 8
+    private(set) var serverBlockSize: Int = 8
     private(set) var serverMacSize = 0
+    private(set) var isEncrypted = false
     
     private var decryptionContext: UnsafeMutablePointer<EVP_CIPHER_CTX>?
     private var encryptionContext: UnsafeMutablePointer<EVP_CIPHER_CTX>?
@@ -356,7 +358,9 @@ final class SSHStateContext {
     
     func fallbackHandler(packet: SSHPacket, channel: Channel) {
         var payload = packet.payload
-        switch payload.readInteger(as: UInt8.self) {
+        let payloadType = payload.readInteger(as: UInt8.self)
+        
+        switch payloadType {
         case SSHPacketType.globalRequest.rawValue:
             guard let type = payload.readSSH2String() else {
                 // SSH2 protocol error
@@ -380,7 +384,28 @@ final class SSHStateContext {
                 return
             }
             
-            channels[id]?(buffer)
+            channels[id]?.value?.read(buffer)
+        case SSHPacketType.channelWindowAdjust.rawValue:
+            guard
+                let id = payload.readInteger(as: UInt32.self),
+                let adjustment = payload.readInteger(as: UInt32.self)
+            else {
+                return
+            }
+            
+            channels[id]?.value?.expandServerWindow(with: adjustment)
+        case SSHPacketType.channelEOF.rawValue:
+            guard let id = payload.readInteger(as: UInt32.self) else {
+                return
+            }
+            
+            _ = channels[id]?.value?.close(mode: .input)
+        case SSHPacketType.channelClose.rawValue:
+            guard let id = payload.readInteger(as: UInt32.self) else {
+                return
+            }
+            
+            _ = channels[id]?.value?.close(mode: .all)
         default:
             ()
         }
@@ -398,23 +423,23 @@ final class SSHStateContext {
         }
     }
     
-    func decrypt(_ buffer: UnsafeMutableRawBufferPointer) throws {
+    func decrypt(_ payload: UnsafeMutableRawBufferPointer) throws {
         guard let decryptionContext = decryptionContext else {
             return
         }
         
-        guard buffer.count % Int(AES_BLOCK_SIZE) == 0 else {
+        guard payload.count % Int(AES_BLOCK_SIZE) == 0 else {
             throw SSHError.protocolError
         }
         
-        guard buffer.count < 40_000 else { // SSH wants us to limit to around 35 KB
+        guard payload.count < 40_000 else { // SSH wants us to limit to around 35 KB
             throw SSHError.packetSize
         }
         
-        let out = UnsafeMutablePointer<UInt8>.allocate(capacity: buffer.count)
+        let out = UnsafeMutablePointer<UInt8>.allocate(capacity: payload.count)
         defer { out.deallocate() }
         
-        let buffer = buffer.bindMemory(to: UInt8.self)
+        let buffer = payload.bindMemory(to: UInt8.self)
         var i: Int32 = 0
         
         while i < buffer.count {
@@ -433,7 +458,16 @@ final class SSHStateContext {
         memcpy(buffer.baseAddress, out, buffer.count)
     }
     
-    func initDecryption(_ decryption: Decryption) {
+    func encryptConnection(
+        decryptUsing decryption: Decryption,
+        encryptUsing encryption: Encryption
+    ) {
+        self.isEncrypted = true
+        initDecryption(decryption)
+        initEncryption(encryption)
+    }
+    
+    private func initDecryption(_ decryption: Decryption) {
         self.verifyDigest = { buffer, sequenceNumber, mac in
             decryption.serverMac.hash(
                 buffer: buffer,
@@ -466,10 +500,11 @@ final class SSHStateContext {
         }
         
         self.serverMacSize = decryption.serverMac.hashSize
+        self.serverBlockSize = decryption.serverCipher.blockSize
         self.decryptionContext = decryptionContext
     }
     
-    func initEncryption(_ encryption: Encryption) {
+    private func initEncryption(_ encryption: Encryption) {
         self.messageDigest = { buffer, sequenceNumber in
             encryption.clientMac.hash(
                 buffer: buffer,
@@ -659,6 +694,7 @@ final class SSHPacketDecoder: ByteToMessageDecoder {
     
     let context: SSHStateContext
     var sequenceNumber: UInt32 = 0
+    private var preDecryptedHeader: ByteBuffer? = nil
      
     init(context: SSHStateContext) {
         self.context = context
@@ -679,7 +715,7 @@ final class SSHPacketDecoder: ByteToMessageDecoder {
             promise.succeed(string)
             return .continue
         case .binaryPackets(let substate):
-            guard var packet = try buffer.readSSHPacket(context: self.context, sequenceNumber: sequenceNumber) else {
+            guard var packet = try buffer.readSSHPacket(context: self.context, preDecryptedHeader: &preDecryptedHeader, sequenceNumber: sequenceNumber) else {
                 return .needMoreData
             }
             
@@ -963,33 +999,115 @@ struct SSHRSA: CertificateFormat {
 }
 
 extension ByteBuffer {
-    mutating func decryptAndMac(context: SSHStateContext, sequenceNumber: UInt32) throws {
-        let macSize = context.serverMacSize
-        guard readableBytes > macSize else {
+    mutating func decrypt(context: SSHStateContext) throws {
+        try withUnsafeMutableReadableBytes(context.decrypt)
+    }
+    
+    mutating func readEncryptedSSHPacket(context: SSHStateContext, preDecryptedHeader: inout ByteBuffer?, sequenceNumber: UInt32) throws -> SSHPacket? {
+        let serverMacSize = context.serverMacSize
+        guard readableBytes >= context.serverBlockSize + context.serverBlockSize else {
+            return nil
+        }
+        
+        let length: UInt32
+        let paddingLength: UInt8
+        var decryptedHeaderAndData: ByteBuffer
+        
+        if let preDecryptedHeader = preDecryptedHeader {
+            guard
+                let _length: UInt32 = preDecryptedHeader.getInteger(at: 0),
+                let _paddingLength: UInt8 = preDecryptedHeader.getInteger(at: 4)
+            else {
+                throw SSHError.internalError
+            }
+            
+            length = _length
+            paddingLength = _paddingLength
+            decryptedHeaderAndData = preDecryptedHeader
+        } else {
+            guard var headerAndData = readSlice(length: context.serverBlockSize) else {
+                return nil
+            }
+            
+            try headerAndData.decrypt(context: context)
+            preDecryptedHeader = headerAndData
+            
+            guard
+                let _length: UInt32 = headerAndData.getInteger(at: 0),
+                let _paddingLength: UInt8 = headerAndData.getInteger(at: 4)
+            else {
+                throw SSHError.internalError
+            }
+            
+            length = _length
+            paddingLength = _paddingLength
+            decryptedHeaderAndData = headerAndData
+        }
+        
+        guard length <= 16_000_000, paddingLength >= 4 else {
+            throw SSHError.unreasonablePacketLength
+        }
+        
+        // Need (length) bytes length itself
+        // This includes the padding length, but we already read the first block (which includes the padding length)
+        // In addition, we do need the mac as well
+        let neededPayloadLength = 4 + Int(length) - context.serverBlockSize
+        
+        guard neededPayloadLength % context.serverBlockSize == 0 else {
             throw SSHError.protocolError
         }
         
-        let mac = self.getBytes(at: readableBytes - macSize, length: macSize) ?? []
-        self.moveWriterIndex(to: writerIndex - macSize)
+        let neededLength = neededPayloadLength + serverMacSize
         
-        try self.withUnsafeMutableReadableBytes { buffer in
-            try context.decrypt(buffer)
-            
-            if macSize > 0, let verifyDigest = context.verifyDigest {
-                let payload = UnsafeRawBufferPointer(
-                    start: buffer.baseAddress,
-                    count: buffer.count
-                )
-                guard verifyDigest(payload, sequenceNumber, mac) else {
+        guard neededLength <= readableBytes else {
+            return nil
+        }
+        
+        // Read the rest in one go
+        guard var remainderPayload = readSlice(length: neededPayloadLength) else {
+            throw SSHError.internalError
+        }
+        
+        try remainderPayload.decrypt(context: context)
+        decryptedHeaderAndData.writeBuffer(&remainderPayload)
+        
+        guard let mac = readBytes(length: serverMacSize) else {
+            throw SSHError.internalError
+        }
+        
+        if serverMacSize > 0, let verifyDigest = context.verifyDigest {
+            try decryptedHeaderAndData.withUnsafeReadableBytes { buffer in
+                guard verifyDigest(buffer, sequenceNumber, mac) else {
                     throw SSHError.invalidMac
                 }
             }
         }
+        
+        guard
+            let payload = decryptedHeaderAndData.getSlice(at: 5, length: Int(length) - 1 - Int(paddingLength)), // - 1 for padding length byte
+            let padding = decryptedHeaderAndData.getSlice(at: 4 + Int(length) - Int(paddingLength), length: Int(paddingLength))
+        else {
+            throw SSHError.internalError
+        }
+        
+        preDecryptedHeader = nil
+        return SSHPacket(
+            length: length,
+            paddingLength: paddingLength,
+            payload: payload,
+            padding: padding
+        )
     }
     
-    mutating func readSSHPacket(context: SSHStateContext, sequenceNumber: UInt32) throws -> SSHPacket? {
-        try decryptAndMac(context: context, sequenceNumber: sequenceNumber)
-        
+    mutating func readSSHPacket(context: SSHStateContext, preDecryptedHeader: inout ByteBuffer?, sequenceNumber: UInt32) throws -> SSHPacket? {
+        if context.isEncrypted {
+            return try readEncryptedSSHPacket(context: context, preDecryptedHeader: &preDecryptedHeader, sequenceNumber: sequenceNumber)
+        } else {
+            return try readUnencryptedSSHPacket(context: context, sequenceNumber: sequenceNumber)
+        }
+    }
+    
+    mutating func readUnencryptedSSHPacket(context: SSHStateContext, sequenceNumber: UInt32) throws -> SSHPacket? {
         let baseIndex = readerIndex
         
         guard

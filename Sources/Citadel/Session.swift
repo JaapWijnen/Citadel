@@ -130,21 +130,19 @@ public final class SSHSession {
                         return self.channel.writeAndFlush(
                             SSHClientMessage.dhAcceptKeys
                         ).map {
-                            self.context.initEncryption(
-                                SSHStateContext.Encryption(
-                                    clientCipher: config.clientEncryption,
-                                    clientMac: config.clientMac,
-                                    params: params
-                                )
+                            let encryption = SSHStateContext.Encryption(
+                                clientCipher: config.clientEncryption,
+                                clientMac: config.clientMac,
+                                params: params
                             )
                             
-                            self.context.initDecryption(
-                                SSHStateContext.Decryption(
-                                    serverCipher: config.serverEncryption,
-                                    serverMac: config.serverMac,
-                                    params: params
-                                )
+                            let decryption = SSHStateContext.Decryption(
+                                serverCipher: config.serverEncryption,
+                                serverMac: config.serverMac,
+                                params: params
                             )
+                            
+                            self.context.encryptConnection(decryptUsing: decryption, encryptUsing: encryption)
                         }
                     } catch {
                         return self.channel.eventLoop.makeFailedFuture(error)
