@@ -700,14 +700,11 @@ final class SSHPacketDecoder: ByteToMessageDecoder {
             case .dhFirstKexPacket(let kexInit, let promise):
                 promise.succeed(kexInit)
             case .dhKeyExchange(let serverIdentificationString, let kexInitBuffer, let promise):
-                guard let dhReply = try DHServerParameters(
+                let dhReply = try DHServerParameters(
                     parsing: &packet.payload,
                     kexInitBuffer: kexInitBuffer,
                     identificationString: serverIdentificationString
-                ) else {
-                    promise.fail(SSHError.protocolError)
-                    throw SSHError.protocolError
-                }
+                )
                 
                 self.context.state = .binaryPackets(.awaitingKeyAcceptance(dhReply, promise))
             case .awaitingKeyAcceptance(let parameters, let promise):
@@ -1057,7 +1054,7 @@ extension ByteBuffer {
 }
 
 enum SSHError: String, Error, CustomDebugStringConvertible {
-    case unreasonablePacketLength, protocolError, disconnected, keysNotAccepted, keyExchangeMismatch, authenticationFailure, passwordChangeRequested, internalError, notRSA, packetSize, invalidMac
+    case unreasonablePacketLength, protocolError, disconnected, keysNotAccepted, keyExchangeMismatch, authenticationFailure, passwordChangeRequested, internalError, notRSA, packetSize, invalidMac, corruptedServerParameters, badServerPubkey
     
     var debugDescription: String {
         rawValue

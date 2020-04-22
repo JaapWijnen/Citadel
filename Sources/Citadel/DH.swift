@@ -33,7 +33,7 @@ final class DHServerParameters {
         self.signature = signature
     }
     
-    init?(parsing buffer: inout ByteBuffer, kexInitBuffer: ByteBuffer, identificationString: String) throws {
+    init(parsing buffer: inout ByteBuffer, kexInitBuffer: ByteBuffer, identificationString: String) throws {
         self.kexInitBuffer = kexInitBuffer
         
         guard
@@ -43,7 +43,7 @@ final class DHServerParameters {
             let hashSignature = buffer.readSSH2Buffer(),
             identificationString.starts(with: "SSH-2.0-")
         else {
-            return nil
+            throw SSHError.corruptedServerParameters
         }
         
         var rsaHostKey = hostKey
@@ -51,12 +51,8 @@ final class DHServerParameters {
         guard rsaHostKey.readSSH2String() == "ssh-rsa" else {
             throw SSHError.notRSA
         }
-        
-        guard
-            let e = rsaHostKey.readMPBignum(),
-            let n = rsaHostKey.readMPBignum()
-        else {
-            return nil
+        guard let e = rsaHostKey.readMPBignum(), let n = rsaHostKey.readMPBignum() else {
+            throw SSHError.badServerPubkey
         }
         
         self.hostKey = hostKey
