@@ -2,33 +2,6 @@
   "object": {
     "pins": [
       {
-        "package": "BSON",
-        "repositoryURL": "https://github.com/OpenKitten/BSON.git",
-        "state": {
-          "branch": null,
-          "revision": "fc14860d67834d778f9de096ea6ffe071d61c62d",
-          "version": "7.0.17"
-        }
-      },
-      {
-        "package": "MongoKitten",
-        "repositoryURL": "https://github.com/OpenKitten/MongoKitten.git",
-        "state": {
-          "branch": null,
-          "revision": "6858a970b1ad00cd3a901993a02490eecd430e96",
-          "version": "6.3.0"
-        }
-      },
-      {
-        "package": "DNSClient",
-        "repositoryURL": "https://github.com/openkitten/NioDNS.git",
-        "state": {
-          "branch": null,
-          "revision": "ea98c8f47c6bd3c54803f417111ddad48595f5d6",
-          "version": "2.0.5"
-        }
-      },
-      {
         "package": "swift-crypto",
         "repositoryURL": "https://github.com/apple/swift-crypto.git",
         "state": {
@@ -38,39 +11,12 @@
         }
       },
       {
-        "package": "swift-log",
-        "repositoryURL": "https://github.com/apple/swift-log.git",
-        "state": {
-          "branch": null,
-          "revision": "74d7b91ceebc85daf387ebb206003f78813f71aa",
-          "version": "1.2.0"
-        }
-      },
-      {
-        "package": "swift-metrics",
-        "repositoryURL": "https://github.com/apple/swift-metrics.git",
-        "state": {
-          "branch": null,
-          "revision": "708b960b4605abb20bc55d65abf6bad607252200",
-          "version": "2.0.0"
-        }
-      },
-      {
         "package": "swift-nio",
         "repositoryURL": "https://github.com/apple/swift-nio.git",
         "state": {
           "branch": null,
           "revision": "e876fb37410e0036b98b5361bb18e6854739572b",
           "version": "2.16.0"
-        }
-      },
-      {
-        "package": "swift-nio-ssl",
-        "repositoryURL": "https://github.com/apple/swift-nio-ssl.git",
-        "state": {
-          "branch": null,
-          "revision": "ae213938e151964aa691f0e902462fbe06baeeb6",
-          "version": "2.7.1"
         }
       }
     ]

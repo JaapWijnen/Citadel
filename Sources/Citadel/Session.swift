@@ -182,7 +182,7 @@ public final class SSHSession {
         }
     }
     
-    func authenticate(username: String, byPassword password: String) -> EventLoopFuture<Void> {
+    public func authenticate(username: String, byPassword password: String) -> EventLoopFuture<Void> {
         let promise = self.channel.eventLoop.makePromise(of: SSHPacket.self)
         
         self.context.handlers[.serviceAccept] = promise.accept
