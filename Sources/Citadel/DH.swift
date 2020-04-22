@@ -1,32 +1,102 @@
 // Read more at: https://wiki.openssl.org/index.php/Diffie_Hellman
-
 import NIO
 import Crypto
+
+/// For now import both modules for simplicity
+/// - TODO: Put these back inside the `#if`s, we definitely don't want to pull in BoringSSL when it isn't in use
+import DiscretionalPrecision
 import CCryptoBoringSSL
 
+// MARK: - Abstractions around the different math backends
+
+#if DH_MATH_DISCRETIONAL
+
+typealias DHHugeInteger = ArbitraryInt
+
+#elseif DH_MATH_BIGNUM
+
+
+typealias DHHugeInteger = _BIGNUM
+
+final class _BIGNUM {
+    static let ctx: ThreadSpecificVariable<OpaquePointer>
+    
+    let raw: UnsafeMutablePointer<BIGNUM>
+    
+    init(raw: UnsafeMutablePointer<BIGNUM>) {
+        self.raw = raw
+    }
+    
+    deinit {
+        CCryptoBoringSSL_BN_free(raw)
+    }
+}
+
+#else
+
+#error("Please activate either DH_MATH_DISCRETIONAL or DH_MATH_BIGNUM in Package.swift")
+
+#endif
+
+// MARK: - Misc types
+
+/// - Note: OpenSSL uses the name "RSAPublicKey" for the traditional PKCS#1 RSA
+///   public key format which is nothing but a couple integers. The name
+///   "RSA_PUBKEY" refers to the (very slightly) more modern PKCS#10
+///   `SubjectPublicKeyInfo` format which encodes an OID for RSA and
+///   encapsulates the PKCS#1 structure in a bit string. The only meaningful
+///   difference is that the PKCS#10 encoding (often erroneously referred to as
+///   a PKCS#8 encoding) can slightly better validate that its contents make
+///   some vague modicum of sense, and of course it's around 16 bytes longer
+///   when encoded as DER. OpenSSL has also been known to - with the very same
+///   pathetic inattention to simplicity, comprehensibility, and safety as the
+///   entire ASN.1 concept form start to finish - refer to RSAPublicKey as being
+///   version 0 and RSA_PUBKEY as being - well, possibly something else, which
+///   is definitively wrong. RFC 3447 defines version 1 as "multi-prime" RSA,
+///   which has nothing to do with the SPKI encoding.
+//
+///   In short, things get real confusing real fast, stick to the basics as much
+///   as you can or you'll be left too dizzy to stand up, just like me!
+struct RSAPublicKey { // "version 0" PKCS#1 pubkey - real old-school, almost mind-shredding in its sheer simplicity
+    let modulus: DHHugeInteger        // n
+    let publicExponent: DHHugeInteger // e
+}
+
+
+// MARK: - DH implementation
+
+/// A set of parameters corresponding to data elements known about, gathered
+/// from, and/or computed regarding a remote server. The parameters are expected
+/// to be suitable to the purpose of performing a Diffie-Hellman key exchange
+/// between the server thusly represented and a corresponding set of
+/// `DHClientParameters` (see below).
 final class DHServerParameters {
+    
+    /// Server version identifier in string form, e.g. "SSH-2.0-babeld-a950f115"
     let identificationString: String
+    
+    /// The complete payload of the server's `SSH_MSG_KEXINIT` packet.
     let kexInitBuffer: ByteBuffer
 //    let hostKeyType: ServerKeyExchangeMethod
-    let serverPublicKey: UnsafeMutablePointer<BIGNUM>
 //    let hostKey: HostKey
+    
+    /// The server's exchange value, serving as its public key for the DH exchange. Also called `f`.
+    let serverPublicKey: DHHugeInteger
     let signature: ByteBuffer
     let hostKey: ByteBuffer
-    let e: UnsafeMutablePointer<BIGNUM>
-    let n: UnsafeMutablePointer<BIGNUM>
+    let rsa: RSAPublicKey
     
     // For testing purposes
     internal init(
-        publicKey: UnsafeMutablePointer<BIGNUM>,
-        rsa: (e: UnsafeMutablePointer<BIGNUM>, n: UnsafeMutablePointer<BIGNUM>),
+        publicKey: DHHugeInteger,
+        rsa: RSAPublicKey,
         hostKey: ByteBuffer,
         signature: ByteBuffer,
         identificationString: String,
         kexInit: ByteBuffer
     ) {
         self.serverPublicKey = publicKey
-        self.e = rsa.e
-        self.n = rsa.n
+        self.rsa = rsa
         self.kexInitBuffer = kexInit
         self.identificationString = identificationString
         self.hostKey = hostKey
@@ -59,8 +129,7 @@ final class DHServerParameters {
         self.identificationString = identificationString
         self.serverPublicKey = CCryptoBoringSSL_BN_bin2bn(publicKey, publicKey.count, nil)
         self.signature = hashSignature
-        self.e = e
-        self.n = n
+        self.rsa = RSAPublicKey(modulus: n, publicExponent: e)
     }
 
     deinit {
@@ -71,7 +140,7 @@ final class DHServerParameters {
 }
 
 public final class DHClientParameters {
-    let identificationString: String
+    let identificationString: String // Client version identifier, e.g. "SSH-2.0-OpenSSH_8.1"
     var kexInitPayload: ByteBuffer {
         keyExchangeConfig.payload
     }
@@ -103,7 +172,7 @@ public final class DHClientParameters {
 }
 
 extension Array where Element == UInt8 {
-    init(bignum: UnsafeMutablePointer<BIGNUM>) {
+    init(bignum: DHHugeInteger) {
         var buffer = ByteBufferAllocator().buffer(capacity: Int(CCryptoBoringSSL_BN_num_bytes(bignum)))
         buffer.writeBignum(bignum)
         self = buffer.readBytes(length: buffer.readableBytes)!
@@ -114,7 +183,7 @@ public final class DHClientServerParameters {
     let client: DHClientParameters
     let server: DHServerParameters
     let config: KeyExchangeConfig
-    let secret: UnsafeMutablePointer<BIGNUM>!
+    let secret: DHHugeInteger!
     private(set) var exchangeHash = [UInt8](repeating: 0, count: 20)
     private(set) var sessionId = [UInt8](repeating: 0, count: 20)
     
@@ -193,21 +262,8 @@ public final class DHClientServerParameters {
     }
 }
 
-// TODO: Use this everywhere
-final class _BIGNUM {
-    let raw: UnsafeMutablePointer<BIGNUM>
-    
-    init(raw: UnsafeMutablePointer<BIGNUM>) {
-        self.raw = raw
-    }
-    
-    deinit {
-        CCryptoBoringSSL_BN_free(raw)
-    }
-}
-
 extension ByteBuffer {
-    mutating func readSimpleMPBignum() -> UnsafeMutablePointer<BIGNUM>? {
+    mutating func readSimpleMPBignum() -> DHHugeInteger? {
         guard let bytes = readSSH2Bytes() else {
             return nil
         }
@@ -215,7 +271,7 @@ extension ByteBuffer {
         return CCryptoBoringSSL_BN_bin2bn(bytes, bytes.count, nil)
     }
     
-    mutating func readMPBignum() -> UnsafeMutablePointer<BIGNUM>? {
+    mutating func readMPBignum() -> DHHugeInteger? {
         guard var bytes = readSSH2Bytes() else {
             return nil
         }
