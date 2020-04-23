@@ -40,24 +40,11 @@ final class _BIGNUM {
 
 // MARK: - Misc types
 
-/// - Note: OpenSSL uses the name "RSAPublicKey" for the traditional PKCS#1 RSA
-///   public key format which is nothing but a couple integers. The name
-///   "RSA_PUBKEY" refers to the (very slightly) more modern PKCS#10
-///   `SubjectPublicKeyInfo` format which encodes an OID for RSA and
-///   encapsulates the PKCS#1 structure in a bit string. The only meaningful
-///   difference is that the PKCS#10 encoding (often erroneously referred to as
-///   a PKCS#8 encoding) can slightly better validate that its contents make
-///   some vague modicum of sense, and of course it's around 16 bytes longer
-///   when encoded as DER. OpenSSL has also been known to - with the very same
-///   pathetic inattention to simplicity, comprehensibility, and safety as the
-///   entire ASN.1 concept form start to finish - refer to RSAPublicKey as being
-///   version 0 and RSA_PUBKEY as being - well, possibly something else, which
-///   is definitively wrong. RFC 3447 defines version 1 as "multi-prime" RSA,
-///   which has nothing to do with the SPKI encoding.
-//
-///   In short, things get real confusing real fast, stick to the basics as much
-///   as you can or you'll be left too dizzy to stand up, just like me!
-struct RSAPublicKey { // "version 0" PKCS#1 pubkey - real old-school, almost mind-shredding in its sheer simplicity
+/// - Note: This is what OpenSSL terms an `RSAPublicKey`, the bare layout going
+///   all the way back to PKCS#1. OpenSSL also has `RSA_PUBKEY`, which is a
+///   PKCS#10 `SubjectPublicKeyInfo` structure with the `rsaEncryption` OID and
+///   an `RSAPublicKey` wrapped in a binary string.
+struct RSAPublicKey {
     let modulus: DHHugeInteger        // n
     let publicExponent: DHHugeInteger // e
 }
@@ -75,37 +62,43 @@ final class DHServerParameters {
     /// Server version identifier in string form, e.g. "SSH-2.0-babeld-a950f115"
     let identificationString: String
     
+    /// The host key algorithm, e.g. `ssh-rsa`, `ecdsa-sha2-nistp256`, `ssh-ed25519`, etc.
+    let hostKeyType: ServerKeyExchangeMethod
+
     /// The complete payload of the server's `SSH_MSG_KEXINIT` packet.
     let kexInitBuffer: ByteBuffer
-//    let hostKeyType: ServerKeyExchangeMethod
-//    let hostKey: HostKey
     
     /// The server's exchange value, serving as its public key for the DH exchange. Also called `f`.
     let serverPublicKey: DHHugeInteger
-    let signature: ByteBuffer
-    let hostKey: ByteBuffer
-    let rsa: RSAPublicKey
     
-    // For testing purposes
+    /// The server's computed signature of `s` as per the chosen "kex_algorithm", calculated over the exchange hash.
+    /// - Note: There is no point in using the kex algorithm to decode this value; it is used only in its raw form anyhow.
+    let signature: ByteBuffer
+    
+    /// The raw bytes of the server's public host key. The "server_host_key_algorithm" defines the format.
+    /// - Note: For now there is no need to decode this value, it is only used in its raw form. This will probably change later.
+    let hostKey: ByteBuffer
+    
+    /// Initialize with pre-specified inputs for all parameters. Needed for testing but should not be used otherwise.
     internal init(
         publicKey: DHHugeInteger,
-        rsa: RSAPublicKey,
         hostKey: ByteBuffer,
         signature: ByteBuffer,
         identificationString: String,
         kexInit: ByteBuffer
     ) {
         self.serverPublicKey = publicKey
-        self.rsa = rsa
         self.kexInitBuffer = kexInit
         self.identificationString = identificationString
         self.hostKey = hostKey
         self.signature = signature
     }
     
+    /// Parse a KEX_ECDH_REPLY packet into a set of server parameters for a
+    /// Diffie-Hellman key agreement operation. The raw payload of the first
+    /// KEXINIT packet and the identity string received when the connection was
+    /// established are also required to complete the setup.
     init(parsing buffer: inout ByteBuffer, kexInitBuffer: ByteBuffer, identificationString: String) throws {
-        self.kexInitBuffer = kexInitBuffer
-        
         guard
             buffer.readInteger(as: UInt8.self) == SSHPacketType.kexdhreply.rawValue,
             let hostKey = buffer.readSSH2Buffer(),
@@ -118,24 +111,15 @@ final class DHServerParameters {
         
         var rsaHostKey = hostKey
         
-        guard rsaHostKey.readSSH2String() == "ssh-rsa" else {
+        guard rsaHostKey.readSSH2String() == "ssh-rsa" else { // TODO: Not this
             throw SSHError.notRSA
         }
-        guard let e = rsaHostKey.readMPBignum(), let n = rsaHostKey.readMPBignum() else {
-            throw SSHError.badServerPubkey
-        }
         
+        self.kexInitBuffer = kexInitBuffer
         self.hostKey = hostKey
         self.identificationString = identificationString
         self.serverPublicKey = CCryptoBoringSSL_BN_bin2bn(publicKey, publicKey.count, nil)
         self.signature = hashSignature
-        self.rsa = RSAPublicKey(modulus: n, publicExponent: e)
-    }
-
-    deinit {
-        CCryptoBoringSSL_BN_free(serverPublicKey)
-// TODO:        CCryptoBoringSSL_BN_free(e)
-//        CCryptoBoringSSL_BN_free(n)
     }
 }
 
